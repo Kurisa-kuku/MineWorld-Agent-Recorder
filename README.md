@@ -1,11 +1,14 @@
 # Mwarecorder
 
+[![build](https://github.com/Kurisa-kuku/MineWorld-Agent-Recorder/actions/workflows/build.yml/badge.svg)](https://github.com/Kurisa-kuku/MineWorld-Agent-Recorder/actions/workflows/build.yml)
+
 A Fabric mod for **Minecraft 1.21.7** that records gameplay into a frame-aligned dataset for
 world-model research and imitation learning.
 
 <p align="center">
   <a href="https://github.com/Kurisa-kuku/MineWorld-Agent-Recorder/releases">Download</a> ·
-  <a href="MWARECORDER_USAGE.txt">User guide</a> ·
+  <a href="MWARECORDER_USAGE_EN.txt">User guide (EN)</a> ·
+  <a href="MWARECORDER_USAGE.txt">用户说明 (中文)</a> ·
   <a href="https://github.com/Kurisa-kuku/MineWorld-Agent-Recorder/issues">Issues</a>
 </p>
 
@@ -44,14 +47,61 @@ or you can build it yourself (see below).
 * Output defaults to `<game_dir>/mwarecorder_data/episode_YYYYMMDD_HHMMSS/`
 * The in-game overlay shows REC/PAUSED, duration, counters and the current dimension
 
-The settings screen (six tabs) controls the save path, which streams are recorded, the
-frame resolution / frame-rate divisor / JPEG quality, the event recording area
-(16×16, 32×32, … blocks around the player) and both key bindings.
-
 Dimension changes are tracked explicitly: entering the Nether or the End writes a
 `dimension_change` event with both positions and the coordinate scale (8:1 for the Nether),
 tags every state and frame with its dimension, and keeps the episode alive across the loading
 screen.
+
+## In-game UI
+
+### Opening the settings
+
+The settings screen can be opened at any time with `O`, or from the pause menu: the
+**MW Recorder** button is in the top-right corner.
+
+![Pause menu with the MW Recorder button in the top-right corner](docs/screenshots/01-pause-menu.webp)
+
+### Video
+
+Frame capture on/off, output resolution, how many rendered frames to skip between captures,
+JPEG quality and the encoder backlog limit. These values apply to the next episode.
+
+![Video settings tab](docs/screenshots/02-video.webp)
+
+### State
+
+Player observation on/off, the nearby-entity scan radius and cap, the look-at ray length, an
+optional full inventory dump, and optional biome / light / weather data.
+
+![State settings tab](docs/screenshots/03-state.webp)
+
+### Input
+
+Keyboard and mouse action capture.
+
+![Input settings tab](docs/screenshots/04-input.webp)
+
+### Events
+
+Event capture on/off, the recording area (16×16, 32×32, … blocks centred on the player), and
+per-category switches for blocks, entities/combat, containers, items, session markers and
+dimension changes.
+
+![Event settings tab](docs/screenshots/05-events.webp)
+
+### Output
+
+Save path (absolute, relative to the game directory, or `~`), open-folder and copy-path
+shortcuts, and which lines the recording overlay shows.
+
+![Output settings tab](docs/screenshots/06-output.webp)
+
+### Keys
+
+Rebind the recording key and the settings key, toggle chat feedback and auto-stop when leaving
+the world, or reset keys / all settings. `Done` saves, `Cancel` (or ESC) discards changes.
+
+![Key settings tab](docs/screenshots/07-keys.webp)
 
 ## Build
 
@@ -76,9 +126,10 @@ Both scripts need Python 3.10+ and numpy.
 
 ## Documentation
 
-The complete guide — UI walkthrough, every configuration key, output schema, event catalogue,
-dimension handling, dataset dimensions, troubleshooting and code map — is in
-[MWARECORDER_USAGE.txt](MWARECORDER_USAGE.txt) (Chinese).
+* [MWARECORDER_USAGE_EN.txt](MWARECORDER_USAGE_EN.txt) — complete English guide: settings
+  walkthrough, every configuration key, output schema, event catalogue, dimension handling,
+  dataset columns, troubleshooting and code map.
+* [MWARECORDER_USAGE.txt](MWARECORDER_USAGE.txt) — the same guide in Chinese (中文).
 
 ## Repository contents
 

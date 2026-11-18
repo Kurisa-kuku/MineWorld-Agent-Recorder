@@ -1,0 +1,567 @@
+================================================================================
+ MWARECORDER USER GUIDE  (Minecraft 1.21.7 / Fabric)
+================================================================================
+
+This is the complete guide for the Mwarecorder recording and player-behaviour
+capture mod. It covers installation, key bindings and the in-game UI, output
+file formats, dimension transitions, every configuration key, dataset
+conversion, the episode verifier, troubleshooting and the code layout.
+
+Applies to mod version 1.0.x (data format format_version 2.0).
+Chinese version: MWARECORDER_USAGE.txt
+See also the screenshots in docs/screenshots/ and the README.
+
+
+--------------------------------------------------------------------------------
+1. WHAT THE MOD DOES
+--------------------------------------------------------------------------------
+
+Mwarecorder records four mutually aligned data streams while you play, intended
+for world-model research and imitation-learning datasets:
+
+  1) Video frames  - one JPEG every N rendered frames (world image, no HUD)
+  2) Player state  - one record per game tick: position, rotation, velocity,
+                     health, food, held items, looking-at block/entity, nearby
+                     entities, biome, light, weather
+  3) Actions       - one record per game tick: WASD/jump/sneak/sprint plus mouse
+                     delta and left/middle/right buttons
+  4) Events        - block break/place/interact, attack, hurt, death, respawn,
+                     item use/pickup, crafting, smelting, container open/close,
+                     dimension change, session pause/resume
+
+Everything is aligned on sample_tick (an episode-wide tick counter). Frames are
+mapped to sample_tick through frames.jsonl, so frame t, state t, action t and
+the events of tick t form one training sample.
+
+When the player enters the Nether or the End, the mod records a dimension
+transition event and tags states and frame records with their dimension, so
+cross-dimension data can be split correctly (see section 7).
+
+
+--------------------------------------------------------------------------------
+2. INSTALLATION AND LAUNCHING
+--------------------------------------------------------------------------------
+
+Requirements:
+  - Minecraft 1.21.7
+  - Fabric Loader >= 0.19.5
+  - Fabric API for 1.21.7
+  - Java 21 or newer
+
+Install:
+  1) Put the built mwarecorder-<version>.jar into .minecraft/mods/
+  2) Add Fabric API to the same folder
+  3) Start the game with a Fabric profile
+
+Development environment (this repository):
+  - Build:          gradlew.bat build
+  - Run the client: gradlew.bat runClient
+  - Recorded data defaults to run/mwarecorder_data/
+
+The first launch creates a commented config/mwarecorder.properties file.
+
+
+--------------------------------------------------------------------------------
+3. QUICK START
+--------------------------------------------------------------------------------
+
+Default keys:
+  K  - start / stop recording
+  O  - open the recorder settings
+
+The settings can also be opened from:
+  - the pause menu (ESC): the "MW Recorder" button in the top-right corner;
+  - Options -> Controls -> Key Binds, category "Mwarecorder";
+  - the Keys tab of the settings screen;
+  - the client command /mwarecorder ... (see section 6).
+
+While recording, the overlay in the top-left shows:
+  REC / PAUSED    state (the blinking square means data is being written)
+  time ...        elapsed time, frame count, dropped frames (slow disk)
+  state/act/event number of records; the number in parentheses is how many
+                  positional events were filtered out by the recording area
+  dim ...         current dimension
+  x/y/z           current coordinates
+
+summary.json additionally records filtered/dropped event counts and dropped
+frame counts, which is useful to judge capture quality.
+
+Pausing the game, loading a world, or opening this mod's settings screen turns
+the overlay into PAUSED and stops writing; recording resumes in the same
+episode file afterwards.
+
+After stopping, the chat shows the episode directory; summary.json holds the
+full statistics.
+
+
+--------------------------------------------------------------------------------
+4. SETTINGS SCREEN (KEY O), TAB BY TAB
+--------------------------------------------------------------------------------
+
+The screen has six tabs. "Done" saves and closes; "Cancel" (or ESC) discards
+all changes. Video and state settings apply to the next episode; the event
+area and overlay options apply immediately.
+
+[Video]
+  Frame capture    Master switch. When off, no frames/ directory or frames.jsonl
+                   content is produced.
+  Resolution       Presets: Native / 1920x1080 / 1280x720 / 960x540 / 640x360 /
+                   480x270 / 320x180. Click the button to cycle.
+  Every N frames   1..10. Higher means a lower frame rate and smaller files.
+                   Default 2.
+  JPEG quality     0.30..1.00. Default 0.85.
+  Encoder backlog  8..256. When the encoder queue exceeds this value new frames
+                   are dropped (memory protection). Dropped frames are shown in
+                   the overlay "drop" counter. Default 64.
+
+[State]
+  Player state     Master switch. Turning it off still advances sample_tick, so
+                   frames and events remain usable.
+  Entity radius    4..64 blocks, search radius for the nearby-entity list.
+                   Default 16.
+  Max entities     0..96, maximum nearby entities recorded per tick (nearest
+                   first). Default 32.
+  Look distance    2..32 blocks, ray length for the "looking at" target.
+                   Default 8.
+  Full inventory   When on, all 36 inventory slots are written every tick
+                   (much larger data; off by default).
+  Biome / light / weather
+                   When on, the state contains an "environment" block (on by
+                   default).
+
+[Input]
+  Input capture    Master switch.
+  Keyboard         Record the seven movement keys.
+  Mouse            Record per-tick mouse dx/dy and left/middle/right state.
+
+[Events]
+  Event capture    Master switch.
+  Recording area   Side length of the square centred on the player:
+                   Unlimited / 16x16 / 32x32 / 48x48 / 64x64 / 96x96 / 128x128.
+                   Default 32x32.
+                   Only positional events (blocks, entities, items, containers)
+                   whose position is inside the square are kept. Far-away
+                   background simulation (for example a squid drowning 50 blocks
+                   away) never reaches the dataset. Session markers and
+                   dimension changes are not affected.
+  Blocks           block_break / block_place / block_interact
+  Entities / combat
+                   entity_attack / entity_interact / entity_hurt / death /
+                   respawn
+  Containers       container_open / container_close / container_change /
+                   item_craft / item_smelt
+  Items            item_use / item_pickup
+  Session markers  session_start / session_pause / session_resume
+  Dimension changes
+                   dimension_change
+
+[Output]
+  Save path        Absolute path, or a path relative to the game directory;
+                   a leading ~ means the user home directory. Backslashes are
+                   normalised to / when saving; both forms are accepted when
+                   reading.
+  Open folder      Create the directory and open it in the OS file manager.
+  Copy path        Copy the resolved absolute path to the clipboard.
+  Recording overlay
+                   Master switch for the overlay plus per-line switches for the
+                   background, timer, counters, dimension and position.
+
+[Keys]
+  Recording key    Click, then press any key (or left/middle/right mouse button)
+                   to bind; ESC cancels listening. If the key is already used by
+                   another action, that binding is released automatically
+                   (same behaviour as the vanilla controls screen).
+  Settings key     Same as above.
+  Chat feedback    Whether start/stop messages are printed in chat.
+  Stop when leaving world
+                   Automatically stop and save the episode when leaving a world
+                   or server (recommended).
+  Reset keys       Restore K for recording and O for settings.
+  Reset settings   Restore every configuration default (written only on Done).
+
+
+--------------------------------------------------------------------------------
+5. CONFIGURATION FILE config/mwarecorder.properties
+--------------------------------------------------------------------------------
+
+Plain UTF-8 text. Keys and their defaults are listed below. The file can be
+edited by hand: it is read at startup and missing keys are added automatically;
+out-of-range values are clamped to safe limits.
+
+  output.directory                (mwarecorder_data)
+  output.write_metadata           (true)
+
+  frames.enabled                  (true)
+  frames.every_n_frames           (2)      1..20
+  frames.jpeg_quality             (0.85)   0.1..1.0
+  frames.width                    (640)    0 = native width
+  frames.height                   (360)    0 = native height
+  frames.max_pending              (64)     1..512
+
+  states.enabled                  (true)
+  states.nearby_radius            (16.0)   4..128
+  states.nearby_max               (32)     0..128
+  states.look_reach               (8.0)    1..64
+  states.include_inventory        (false)
+  states.include_environment      (true)
+
+  actions.enabled                 (true)
+  actions.keyboard                (true)
+  actions.mouse                   (true)
+
+  events.enabled                  (true)
+  events.area_size                (32)     0 = unlimited, otherwise an even
+                                           side length in blocks
+  events.block                    (true)
+  events.entity                   (true)
+  events.container                (true)
+  events.item                     (true)
+  events.session                  (true)
+  events.dimension                (true)
+
+  hud.enabled                     (true)
+  hud.background                  (true)
+  hud.timer                       (true)
+  hud.counters                    (true)
+  hud.dimension                   (true)
+  hud.position                    (true)
+  hud.offset_x                    (4)
+  hud.offset_y                    (4)
+
+  ui.chat_feedback                (true)
+  ui.auto_stop_on_disconnect      (true)
+
+Legacy keys are accepted as fallbacks: frame_capture.*, data.output_directory
+and events.combat.
+
+
+--------------------------------------------------------------------------------
+6. CLIENT COMMANDS
+--------------------------------------------------------------------------------
+
+Type these in chat (they work in single-player and on multiplayer clients; they
+only affect local recording):
+
+  /mwarecorder start              start recording
+  /mwarecorder stop               stop recording
+  /mwarecorder status             show episode, elapsed time, counters,
+                                  dimensions and directory
+  /mwarecorder config             open the settings screen
+  /mwarecorder path               copy the episode (or output root) path
+  /mwarecorder hud                toggle the recording overlay
+  /mwarecorder area <0-256>       change the event area (0 = unlimited)
+
+Example: /mwarecorder area 16 records events only within 16x16 blocks around
+the player.
+
+
+--------------------------------------------------------------------------------
+7. DIMENSION TRANSITIONS (NETHER / END)
+--------------------------------------------------------------------------------
+
+Minecraft replaces the client level when walking through a portal and scales
+the coordinate system (Overworld : Nether = 8 : 1). The mod handles this as
+follows:
+
+  1) Every tick the current dimension id is compared with the previous one; on
+     a change an event is written:
+
+     {"type":"dimension_change",
+      "from":"minecraft:overworld",
+      "to":"minecraft:the_nether",
+      "from_position":{"x":..,"y":..,"z":..},
+      "to_position":{"x":..,"y":..,"z":..},
+      "from_coordinate_scale":1.0,
+      "to_coordinate_scale":8.0,
+      "from_overworld_equivalent":{"x":..,"z":..},
+      "to_overworld_equivalent":{"x":..,"z":..},
+      "segment":1,
+      "sample_tick":.., "world_time":.., "dimension":"minecraft:the_nether"}
+
+     overworld_equivalent maps both sides into the same coordinate system, which
+     makes it easy to align the two ends of a portal.
+
+  2) Every state record contains dimension (both at the top level and inside
+     player) plus dimension_scale; every frame index record contains dimension.
+
+  3) Portal travel shows a world-loading screen, during which recording is
+     PAUSED automatically. After loading it continues in the same episode and
+     writes session_pause / session_resume markers.
+
+  4) metadata.json stores start_dimension; summary.json stores the
+     dimensions_visited array; the overlay "dim" line updates in real time.
+
+  5) The dataset tool writes dimensions.npy, sample_dimensions.txt,
+     dimension_labels.json and dimension_segments.json, and supports
+     --split-by-dimension to write one dataset per dimension.
+
+Note: world_time is the game time of the current dimension and is not
+guaranteed to be continuous across dimensions; the verifier only checks
+monotonicity within one dimension.
+
+
+--------------------------------------------------------------------------------
+8. OUTPUT DIRECTORY LAYOUT
+--------------------------------------------------------------------------------
+
+<save path>/
+  episode_YYYYMMDD_HHMMSS/          one directory per recording (same-second
+                                    names get _2, _3, ...)
+    metadata.json                   static info: versions, mod list, world,
+                                    player, capture settings
+    state.jsonl                     one player state per tick
+    action.jsonl                    one action per tick
+    event.jsonl                     discrete events (each with
+                                    sample_tick/world_time/dimension)
+    frames.jsonl                    frame index: frame_id / sample_tick /
+                                    world_time / file / dimension
+    summary.json                    final statistics: counts, duration,
+                                    dimensions, dropped frames, stop reason
+    frames/
+      frame_000001.jpg ...          JPEG files named by frame_id
+
+All .jsonl files are UTF-8, one compact JSON object per line, appended as the
+episode runs, which is friendly to streaming loaders.
+
+state.jsonl example (excerpt):
+  {"sample_tick":1,"world_time":8831,"dimension":"minecraft:overworld",
+   "player":{"position":{...},"rotation":{...},"look_direction":{...},
+             "velocity":{...},"health":20.0,"max_health":20.0,"absorption":0.0,
+             "food":20,"saturation":5.0,"air":300,"max_air":300,
+             "xp_level":0,"xp_progress":0.0,
+             "sprinting":false,"sneaking":false,"on_ground":true,
+             "swimming":false,"in_water":false,"on_fire":false,"flying":false,
+             "fall_distance":0.0,"portal_cooldown":0,
+             "selected_slot":3,"held_item":{"type":"minecraft:charcoal","count":1},
+             "looking_at":{"kind":"block",
+                           "block":{"x":..,"y":..,"z":..,"type":"minecraft:stone"},
+                           "distance":3.2,"hit_face":"up"},
+             "nearby_entities":[{"id":38,"type":"minecraft:sheep",
+                                 "position":{...},"relative_position":{...},
+                                 "distance":12.9,"yaw":..,"pitch":..,
+                                 "health":8.0,"max_health":8.0,"is_alive":true}],
+             "environment":{"biome":"minecraft:plains","block_light":0,
+                            "sky_light":15,"eye_block_light":0,"day_time":..,
+                            "raining":false,"thundering":false,"rain_level":0.0,
+                            "difficulty":"normal","game_mode":"survival"},
+             "dimension":"minecraft:overworld","dimension_scale":1.0}}
+
+action.jsonl example:
+  {"sample_tick":1,"keys":{"forward":true,"back":false,"left":false,
+   "right":false,"jump":false,"sneak":false,"sprint":false},
+   "mouse":{"dx":0.0,"dy":0.0,"left":false,"middle":false,"right":false}}
+
+Event types:
+  session_start / session_pause / session_resume
+  dimension_change
+  block_break / block_place / block_interact
+  entity_attack / entity_interact / entity_hurt / death / respawn
+  item_use / item_pickup
+  item_craft / item_smelt / container_open / container_close / container_change
+
+
+--------------------------------------------------------------------------------
+9. CONVERTING TO A TRAINING DATASET
+--------------------------------------------------------------------------------
+
+Script: src/main/java/com/kurisa/mwarecorder/tools/episode_to_dataset.py
+Dependency: numpy (included in the local conda environment "kuku")
+
+Usage:
+  conda activate kuku
+  python episode_to_dataset.py <episode directory or data root directory>
+
+Options:
+  --nearby-k N            nearby-entity slots per tick (default 16)
+  --force                 overwrite an existing dataset/
+  --sample-source auto|frames|states
+                          sample alignment; auto prefers frames and falls back
+                          to states when no frames exist
+  --split-by-dimension    also write dataset/by_dimension/<dimension>/
+
+Output (<episode>/dataset/):
+  observations.npy      [N, D_obs] float32   state features
+  actions.npy           [N, D_act] float32   action features
+  rewards.npy           [N] float32          zeros (placeholder)
+  dones.npy             [N] bool             last sample is True
+  sample_ticks.npy      [N] int32
+  world_times.npy       [N] int64
+  dimensions.npy        [N] int32            dimension id
+  dimension_labels.json {dimension name: id}
+  sample_dimensions.txt one dimension name per sample
+  dimension_segments.json contiguous dimension runs (index and tick ranges)
+  frame_paths.txt       one frame file name per line (relative to frames/)
+  events.json           {"sample_tick": [events]}
+  vocab.json            item / block / entity / biome / dimension vocabularies
+                        (0 = unknown)
+  obs_schema.json       meaning and range of every observation column
+  act_schema.json       meaning and range of every action column
+  meta.json             statistics, capture settings, dimension list
+
+The observation vector (D_obs) is assembled from the following parts, in the
+same order as obs_schema.json:
+  position(3) rotation(2) look_direction(3) velocity(3)
+  health(3: health,max,absorption) food(3: food,saturation,air)
+  progress(2) flags(7) selected_slot(1)
+  held_item(2) offhand_item(2)
+  looking_at(5) nearby_entity[i](9*i)
+  dimension(2: id, scale)
+  environment(7: biome, block_light, sky_light, rain_level, raining,
+               thundering, day_time)
+
+Action vector (D_act, 12):
+  keys(7) mouse_delta(2) mouse_buttons(3)
+
+Training tips:
+  - use dones.npy to split trajectories; sample_ticks aligns with events and
+    frames;
+  - the interval between session_pause and session_resume can be treated as
+    "no data" and dropped if desired;
+  - dimensions.npy + dimension_segments.json can drive per-dimension training
+    or be used as a conditioning input;
+  - with --split-by-dimension, each dimension sub-directory is an independent
+    dataset with identical column definitions.
+
+
+--------------------------------------------------------------------------------
+10. EPISODE VERIFICATION
+--------------------------------------------------------------------------------
+
+Script: src/main/java/com/kurisa/mwarecorder/tools/verify_episode.py
+
+Usage:
+  python verify_episode.py <episode directory or data root directory>
+  python verify_episode.py <directory> --quiet          overview only
+  python verify_episode.py <directory> --json report.json
+  python verify_episode.py <directory> --strict         non-zero exit on ERROR
+
+Checks:
+  - required files and metadata fields;
+  - sample_tick continuity and alignment across state / action / frames;
+  - every referenced JPEG exists, has a plausible size, and no orphan files;
+  - world_time never runs backwards inside one dimension (a small resync within
+    40 ticks after a dimension change is tolerated);
+  - player teleports (dimension changes excluded);
+  - event ticks exist in the state stream and pause/resume markers are paired;
+  - dimension transitions in the state stream match dimension_change events;
+  - NaN / Infinity values and missing key fields;
+  - summary.json counters match the actual record counts.
+
+Exit codes: 0 pass; 1 (--strict with an ERROR); 2 path or episode missing.
+
+
+--------------------------------------------------------------------------------
+11. FAQ
+--------------------------------------------------------------------------------
+
+Q: Pressing K does nothing.
+A: Make sure you are in a world (not the title screen) and the key is not used
+   by another mod. Rebind it in Options -> Controls -> Key Binds -> Mwarecorder
+   or on the Keys tab of the settings screen. If all four capture groups
+   (video/state/input/events) are disabled, the mod refuses to start and says
+   so in chat; enable at least one.
+
+Q: No frames are recorded.
+A: Check that "Frame capture" is on in the Video tab and that there is free disk
+   space. If the drop counter keeps growing, the disk cannot keep up: increase
+   "Every N frames", lower the resolution/quality, or lower the encoder backlog.
+
+Q: The frames do not contain the HUD or the overlay.
+A: By design: frames are read from the world image before the HUD is drawn, so
+   the recording overlay never ends up in the video. Use external screen capture
+   if you need the HUD.
+
+Q: Why are there gaps in state.jsonl?
+A: Nothing is written while paused, while the settings screen is open or while
+   a world is loading; recording continues afterwards, so sample_tick only
+   advances on ticks that were actually recorded. Session boundaries are marked
+   with session_pause / session_resume.
+
+Q: Nether coordinates look much smaller.
+A: Nether coordinates are 1/8 of the Overworld by design. Use the dimension
+   field together with dimension_change.from/to_overworld_equivalent.
+
+Q: How long / how large is a recording?
+A: Reference values (640x360, q0.85, every 2 frames, ~30 FPS client):
+     video: about 10 frames/s, 0.4-0.7 MB/s, 1.5-2.5 GB/hour;
+     state + action: about 20-40 KB/s, 70-140 MB/hour (without full inventory).
+   Increasing every_n_frames and lowering the resolution/quality reduce this
+   significantly.
+
+Q: Does it work on multiplayer servers?
+A: Yes. Client behaviour, video, state, block and item events can be recorded.
+   Server-authoritative events such as hurt/death/container slot changes only
+   exist in single-player (integrated server) or when the server also runs this
+   mod. On multiplayer servers those events are naturally absent.
+
+Q: summary.json is missing after stopping.
+A: Normal stops (key, command, leaving the world, closing the game) write
+   summary.json. A crash can leave it missing; state/action/event are still
+   readable and can be checked with the verifier.
+
+Q: The settings screen is too small or does not fit.
+A: The layout adapts to the GUI scale (content width up to 430). If the window
+   is very small, lower the GUI scale; each tab uses at most eight rows.
+
+
+--------------------------------------------------------------------------------
+12. CODE LAYOUT (FOR FURTHER DEVELOPMENT)
+--------------------------------------------------------------------------------
+
+com.kurisa.mwarecorder
+  Mwarecorder.java                 common entry point: hurt/death/respawn events
+  MwarecorderClient.java           client entry point: keys, tick pipeline,
+                                   rendering and disconnect handling
+
+  config/MwarecorderConfig.java    configuration definition, IO, validation,
+                                   path resolution
+
+  recorder/
+    EpisodeManager.java            episode lifecycle and "is recording" logic
+    TickRecorder.java              sample_tick advancement and state writing
+    PlayerSnapshot.java            per-tick player observation
+    FrameCapture.java              OpenGL pixel read + asynchronous JPEG encode
+    ContainerTracker.java          container screen open/close detection
+    DimensionTracker.java          dimension transition detection and events
+    RecordingStats.java            live counters for the overlay and summary
+    PausesRecording.java           marker for screens that suspend recording
+
+  event/
+    EventRecorder.java             event queue, flush, payload builders
+    EventCategory.java             event classification and switches
+    EventFilter.java               recording-area (16x16/32x32/...) filter
+    SlotDiff.java                  container slot difference
+    ContainerEventBuilder.java     crafting/smelting/container semantics
+
+  export/JsonExporter.java         all output files, metadata and summary
+
+  input/
+    MwarecorderKeys.java           key registration and rebinding
+    ActionRecorder.java            per-tick input snapshot
+    MouseInputRecorder.java        raw mouse input accumulation
+
+  ui/
+    MwarecorderConfigScreen.java   six-tab settings screen
+    MwarecorderHud.java            recording overlay
+
+  command/MwarecorderClientCommand.java  client /mwarecorder command
+
+  mixin/                           GameMode / ItemEntity / ServerPlayer /
+                                   Mouse / PauseScreen injection
+
+  tools/
+    episode_to_dataset.py          episode -> numpy dataset
+    verify_episode.py              episode integrity checker
+
+
+--------------------------------------------------------------------------------
+13. VERSION AND COMPATIBILITY
+--------------------------------------------------------------------------------
+
+Data format format_version = 2.0 (schema_version = 2).
+Older (1.1) episodes can still be converted and verified:
+  - missing fields fall back to 0/default values;
+  - a missing dimension field is reported as "unknown";
+  - legacy config keys frame_capture.* / data.output_directory are accepted.
+
+================================================================================
