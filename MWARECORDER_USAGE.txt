@@ -1,0 +1,498 @@
+================================================================================
+ MWARECORDER 使用说明  (Minecraft 1.21.7 / Fabric)
+================================================================================
+
+本文件是 Mwarecorder 录屏 + 玩家行为数据采集模组的完整使用说明，包含：
+安装、按键与界面、输出文件格式、维度切换处理、配置项、数据集转换、
+校验工具、常见问题与代码结构。
+
+适用于模组版本 1.0.x（数据格式 format_version 2.0）。
+
+
+--------------------------------------------------------------------------------
+1. 这个模组做什么
+--------------------------------------------------------------------------------
+
+Mwarecorder 在游戏内采集四路互相对齐的数据，用于构造世界模型 / 行为克隆
+(imitation learning) 的训练数据集：
+
+  1) 画面帧      —— 每 N 个渲染帧截一张 JPEG（世界画面，不含 HUD）
+  2) 玩家状态    —— 每个游戏刻一条：位置、朝向、速度、生命、饥饿、手持物、
+                    视线命中的方块/实体、附近实体、生物群系、光照、天气
+  3) 操作输入    —— 每个游戏刻一条：WASD/跳跃/潜行/疾跑 + 鼠标位移与左右中键
+  4) 离散事件    —— 挖掘、放置、交互、攻击、受伤、死亡、重生、物品使用/拾取、
+                    合成、熔炼、容器开关、维度切换、会话暂停/恢复
+
+所有数据以 sample_tick（录制内的刻计数器）对齐；画面帧通过 frames.jsonl 与
+sample_tick 对应，因此可以直接把第 t 刻的画面、状态、动作、事件配成一条样本。
+
+进入下界/末地时，模组会记录维度切换事件，并在状态与画面索引中写入维度字段，
+保证跨维度数据可以正确切分（详见第 7 节）。
+
+
+--------------------------------------------------------------------------------
+2. 安装与启动
+--------------------------------------------------------------------------------
+
+环境要求：
+  - Minecraft 1.21.7
+  - Fabric Loader >= 0.19.5
+  - Fabric API（版本与 1.21.7 对应）
+  - Java 21 或更高
+
+安装：
+  1) 把构建出的 mwarecorder-<version>.jar 放入 .minecraft/mods/
+  2) 同时放入 Fabric API
+  3) 启动游戏
+
+开发环境（本仓库）：
+  - 编译：      gradlew.bat build --offline
+  - 启动客户端：gradlew.bat runClient
+  - 生成的数据默认在 run/mwarecorder_data/
+
+首次启动会在 config/mwarecorder.properties 生成带注释的配置文件。
+
+
+--------------------------------------------------------------------------------
+3. 快速开始
+--------------------------------------------------------------------------------
+
+默认按键：
+  K  —— 开始 / 停止录制
+  O  —— 打开录制设置界面
+
+也可以：
+  - 在暂停菜单（ESC）右上角点击 “MW Recorder” 按钮打开设置；
+  - 在“选项 -> 控制 -> 按键绑定”里找到分类 Mwarecorder 重新绑定；
+  - 在设置界面的 Keys 页直接改键；
+  - 使用客户端命令 /mwarecorder ...（见第 6 节）。
+
+录制时左上角会显示悬浮窗：
+  REC / PAUSED   状态（闪烁方块表示正在写入）
+  time ...       已录制时长、帧数、因磁盘跟不上而丢弃的帧数
+  state/act/event 三路数据条数，括号内是被事件范围过滤掉的数量
+  dim ...        当前维度
+  x/y/z          当前坐标
+
+summary.json 另外记录 filtered / dropped 事件数与 dropped 帧数，便于评估
+采集质量。
+
+暂停游戏、切到世界加载界面、或打开本模组设置界面时，悬浮窗变为 PAUSED，
+该时间段不写入数据；恢复后在同一个 episode 文件中继续写入。
+
+停止录制后聊天栏会提示 episode 目录；summary.json 中有完整统计。
+
+
+--------------------------------------------------------------------------------
+4. 设置界面（O 键）逐项说明
+--------------------------------------------------------------------------------
+
+界面顶部有 6 个分页。左下角 Done 保存并关闭，Cancel（或 ESC）放弃所有修改。
+提示：画面/状态类参数在下一次开始录制时生效；事件范围、悬浮窗等立即生效。
+
+[Video] 画面
+  画面录制        总开关。关闭后不产生 frames/ 与 frames.jsonl 内容。
+  分辨率          预设：原始 / 1920x1080 / 1280x720 / 960x540 / 640x360 /
+                  480x270 / 320x180。点击按钮循环切换。
+  每 N 帧取一帧   1..10。数值越大帧率越低、文件越小。默认 2。
+  JPEG 质量       0.30..1.00。默认 0.85。
+  编码队列上限    8..256。编码线程积压超过该值时丢弃新帧（保护内存），
+                  丢弃数会显示在悬浮窗 drop 计数中。默认 64。
+
+[State] 玩家状态
+  玩家状态        总开关（关闭后仍会推进 sample_tick，事件/画面仍可用）。
+  实体扫描半径    4..64 格，附近实体列表的搜索半径。默认 16。
+  实体上限        0..96，每刻最多记录的附近实体数（按距离排序）。默认 32。
+  视线距离        2..32 格，“正在看什么”的射线长度。默认 8。
+  完整背包        开启后每刻写入 36 格背包（数据量明显变大，默认关闭）。
+  生物群系/光照/天气  开启后状态里包含 environment 块（默认开启）。
+
+[Input] 操作
+  操作录制        总开关。
+  键盘            记录 7 个移动相关按键。
+  鼠标            记录每刻鼠标位移 dx/dy 与左/中/右键状态。
+
+[Events] 事件
+  事件录制        总开关。
+  录制范围        以玩家为中心的正方形边长：不限 / 16x16 / 32x32 / 48x48 /
+                  64x64 / 96x96 / 128x128。默认 32x32。
+                  只保留中心在该正方形内的位置型事件（方块、实体、物品、
+                  容器）；远处的背景模拟（例如 50 格外的鱿鱼溺水掉血）不会
+                  进入数据集。会话标记与维度切换不受此限制。
+  方块事件        block_break / block_place / block_interact
+  实体/战斗事件   entity_attack / entity_interact / entity_hurt / death / respawn
+  容器事件        container_open / container_close / container_change /
+                  item_craft / item_smelt
+  物品事件        item_use / item_pickup
+  会话标记        session_start / session_pause / session_resume
+  维度切换        dimension_change
+
+[Output] 输出
+  保存路径        绝对路径或相对游戏目录的路径；支持 ~ 开头（用户主目录）。
+                  保存时反斜杠会统一为 /，读取时两种都接受。
+  打开文件夹      创建目录并用系统文件管理器打开。
+  复制路径        复制解析后的绝对路径到剪贴板。
+  录制悬浮窗      悬浮窗总开关，以及背景、时长、计数、维度、坐标分项开关。
+
+[Keys] 按键与交互
+  录制按键        点击后显示 “> press a key <”，按任意键（或鼠标左/中/右键）
+                  完成绑定；ESC 取消聆听。若该键已被其他功能占用，会自动
+                  解除其他绑定（与原生按键界面一致）。
+  设置按键        同上。
+  聊天栏提示      开始/停止时是否在聊天栏输出提示。
+  离开世界时停止  退出存档/服务器时自动结束并保存 episode（推荐开启）。
+  重置按键        录制键恢复 K，设置键恢复 O。
+  重置设置        全部配置恢复默认值（点 Done 才会写盘）。
+
+
+--------------------------------------------------------------------------------
+5. 配置文件 config/mwarecorder.properties
+--------------------------------------------------------------------------------
+
+文件为纯文本 UTF-8，键名如下（括号内为默认值）。也可直接手工编辑，
+启动时读取并自动补齐新字段；非法值会被限制到安全范围。
+
+  output.directory                (mwarecorder_data)
+  output.write_metadata           (true)
+
+  frames.enabled                  (true)
+  frames.every_n_frames           (2)      1..20
+  frames.jpeg_quality             (0.85)   0.1..1.0
+  frames.width                    (640)    0 表示原始宽度
+  frames.height                   (360)    0 表示原始高度
+  frames.max_pending              (64)     1..512
+
+  states.enabled                  (true)
+  states.nearby_radius            (16.0)   4..128
+  states.nearby_max               (32)     0..128
+  states.look_reach               (8.0)    1..64
+  states.include_inventory        (false)
+  states.include_environment      (true)
+
+  actions.enabled                 (true)
+  actions.keyboard                (true)
+  actions.mouse                   (true)
+
+  events.enabled                  (true)
+  events.area_size                (32)     0 = 不限；否则为偶数边长
+  events.block                    (true)
+  events.entity                   (true)
+  events.container                (true)
+  events.item                     (true)
+  events.session                  (true)
+  events.dimension                (true)
+
+  hud.enabled                     (true)
+  hud.background                  (true)
+  hud.timer                       (true)
+  hud.counters                    (true)
+  hud.dimension                   (true)
+  hud.position                    (true)
+  hud.offset_x                    (4)
+  hud.offset_y                    (4)
+
+  ui.chat_feedback                (true)
+  ui.auto_stop_on_disconnect      (true)
+
+兼容旧版配置键：frame_capture.*、data.output_directory、events.combat
+会在读取时作为回退值使用。
+
+
+--------------------------------------------------------------------------------
+6. 客户端命令
+--------------------------------------------------------------------------------
+
+在聊天栏输入（单人/多人客户端均可用，只影响本地录制）：
+
+  /mwarecorder start              开始录制
+  /mwarecorder stop               停止录制
+  /mwarecorder status             显示 episode、时长、计数、维度、目录
+  /mwarecorder config             打开设置界面
+  /mwarecorder path               复制当前 episode（或输出根目录）路径
+  /mwarecorder hud                开关悬浮窗
+  /mwarecorder area <0-256>       修改事件录制范围（0 = 不限）
+
+示例：/mwarecorder area 16   只记录玩家周围 16x16 格内的事件。
+
+
+--------------------------------------------------------------------------------
+7. 维度切换（下界 / 末地）的处理
+--------------------------------------------------------------------------------
+
+Minecraft 在穿过传送门时会替换客户端世界对象，坐标体系也会缩放
+（主世界 : 下界 = 8 : 1）。模组为此做了以下处理：
+
+  1) 每个 tick 比较当前维度 id，发生变化时写入事件：
+
+     {"type":"dimension_change",
+      "from":"minecraft:overworld",
+      "to":"minecraft:the_nether",
+      "from_position":{"x":..,"y":..,"z":..},
+      "to_position":{"x":..,"y":..,"z":..},
+      "from_coordinate_scale":1.0,
+      "to_coordinate_scale":8.0,
+      "from_overworld_equivalent":{"x":..,"z":..},
+      "to_overworld_equivalent":{"x":..,"z":..},
+      "segment":1,
+      "sample_tick":.., "world_time":.., "dimension":"minecraft:the_nether"}
+
+     overworld_equivalent 把两个维度换算到同一坐标系，便于对齐传送门两侧。
+
+  2) state.jsonl 每条记录都有 dimension（顶层 + player 内各一份）以及
+     dimension_scale；帧索引 frames.jsonl 每条也有 dimension。
+
+  3) 穿过传送门时会出现世界加载界面，此时录制自动 PAUSED；加载完成后
+     继续写入同一 episode，并产生 session_pause / session_resume 标记。
+
+  4) metadata.json 记录 start_dimension；summary.json 记录
+     dimensions_visited 数组；悬浮窗 dim 行实时更新。
+
+  5) 数据集工具会输出 dimensions.npy、sample_dimensions.txt、
+     dimension_labels.json、dimension_segments.json，并支持
+     --split-by-dimension 按维度切分数据集。
+
+注意：world_time 是“当前维度自己的 game time”，不同维度之间不保证连续；
+校验工具只在同一维度内检查 world_time 单调性。
+
+
+--------------------------------------------------------------------------------
+8. 输出目录结构
+--------------------------------------------------------------------------------
+
+<保存路径>/
+  episode_YYYYMMDD_HHMMSS/          每次录制一个目录（同秒重名自动加 _2、_3）
+    metadata.json                   静态信息：版本、Mod 列表、世界、玩家、采集配置
+    state.jsonl                     每刻一条玩家状态
+    action.jsonl                    每刻一条操作
+    event.jsonl                     离散事件（每条含 sample_tick/world_time/dimension）
+    frames.jsonl                    帧索引：frame_id / sample_tick / world_time / file / dimension
+    summary.json                    结束统计：条数、时长、维度、丢弃帧、停止原因
+    frames/
+      frame_000001.jpg ...          按 frame_id 命名的 JPEG
+
+所有 .jsonl 为 UTF-8、每行一个紧凑 JSON 对象，追加写入，便于流式读取。
+
+state.jsonl 示例（节选）：
+  {"sample_tick":1,"world_time":8831,"dimension":"minecraft:overworld",
+   "player":{"position":{...},"rotation":{...},"look_direction":{...},
+             "velocity":{...},"health":20.0,"max_health":20.0,"absorption":0.0,
+             "food":20,"saturation":5.0,"air":300,"max_air":300,
+             "xp_level":0,"xp_progress":0.0,
+             "sprinting":false,"sneaking":false,"on_ground":true,
+             "swimming":false,"in_water":false,"on_fire":false,"flying":false,
+             "fall_distance":0.0,"portal_cooldown":0,
+             "selected_slot":3,"held_item":{"type":"minecraft:charcoal","count":1},
+             "looking_at":{"kind":"block",
+                           "block":{"x":..,"y":..,"z":..,"type":"minecraft:stone"},
+                           "distance":3.2,"hit_face":"up"},
+             "nearby_entities":[{"id":38,"type":"minecraft:sheep",
+                                 "position":{...},"relative_position":{...},
+                                 "distance":12.9,"yaw":..,"pitch":..,
+                                 "health":8.0,"max_health":8.0,"is_alive":true}],
+             "environment":{"biome":"minecraft:plains","block_light":0,
+                            "sky_light":15,"eye_block_light":0,"day_time":..,
+                            "raining":false,"thundering":false,"rain_level":0.0,
+                            "difficulty":"normal","game_mode":"survival"},
+             "dimension":"minecraft:overworld","dimension_scale":1.0}}
+
+action.jsonl 示例：
+  {"sample_tick":1,"keys":{"forward":true,"back":false,"left":false,
+   "right":false,"jump":false,"sneak":false,"sprint":false},
+   "mouse":{"dx":0.0,"dy":0.0,"left":false,"middle":false,"right":false}}
+
+事件类型一览：
+  session_start / session_pause / session_resume
+  dimension_change
+  block_break / block_place / block_interact
+  entity_attack / entity_interact / entity_hurt / death / respawn
+  item_use / item_pickup
+  item_craft / item_smelt / container_open / container_close / container_change
+
+
+--------------------------------------------------------------------------------
+9. 转成训练数据集
+--------------------------------------------------------------------------------
+
+脚本：src/main/java/com/kurisa/mwarecorder/tools/episode_to_dataset.py
+依赖：numpy（本机 conda 环境 kuku 已包含）
+
+用法：
+  conda activate kuku
+  python episode_to_dataset.py <episode目录 或 数据根目录>
+
+常用参数：
+  --nearby-k N            每刻保留的附近实体槽位数（默认 16）
+  --force                 覆盖已存在的 dataset/
+  --sample-source auto|frames|states
+                          样本对齐方式；auto 优先用帧，没有帧时用状态
+  --split-by-dimension    额外按维度段落输出 dataset/by_dimension/<维度>/
+
+输出（<episode>/dataset/）：
+  observations.npy      [N, D_obs] float32   状态特征
+  actions.npy           [N, D_act] float32   动作特征
+  rewards.npy           [N] float32          暂为 0，占位
+  dones.npy             [N] bool             最后一个样本为 True
+  sample_ticks.npy      [N] int32
+  world_times.npy       [N] int64
+  dimensions.npy        [N] int32             维度 id
+  dimension_labels.json {维度名: id}
+  sample_dimensions.txt 每个样本的维度名
+  dimension_segments.json 连续维度段落（索引与 tick 范围）
+  frame_paths.txt       每行一个帧文件名（相对 frames/）
+  events.json           {"sample_tick": [events]}
+  vocab.json            item / block / entity / biome / dimension 词表（0=未知）
+  obs_schema.json       观测每一列的含义与区间
+  act_schema.json       动作每一列的含义与区间
+  meta.json             统计信息、采集配置、维度列表
+
+观测维度（D_obs）由以下部分拼接，顺序与 obs_schema.json 一致：
+  position(3) rotation(2) look_direction(3) velocity(3)
+  health(3: health,max,absorption) food(3: food,saturation,air)
+  progress(2) flags(7) selected_slot(1)
+  held_item(2) offhand_item(2)
+  looking_at(5) nearby_entity[i](9*i)
+  dimension(2: id, scale)
+  environment(7: biome, block_light, sky_light, rain_level, raining, thundering, day_time)
+
+动作维度（D_act，12）：
+  keys(7) mouse_delta(2) mouse_buttons(3)
+
+训练提示：
+  - 用 dones.npy 切分轨迹；sample_ticks 用于与事件、帧对齐；
+  - session_pause / session_resume 之间可以视为“无数据”，按需丢弃；
+  - dimensions.npy + dimension_segments.json 可用来分维度训练或作为条件输入；
+  - 若开启 --split-by-dimension，每个维度子目录都是独立的、列定义相同的数据集。
+
+
+--------------------------------------------------------------------------------
+10. 数据校验
+--------------------------------------------------------------------------------
+
+脚本：src/main/java/com/kurisa/mwarecorder/tools/verify_episode.py
+
+用法：
+  python verify_episode.py <episode目录 或 数据根目录>
+  python verify_episode.py <目录> --quiet          只看总览
+  python verify_episode.py <目录> --json report.json
+  python verify_episode.py <目录> --strict         有 ERROR 时退出码非 0
+
+检查内容：
+  - 必需文件与 metadata 字段；
+  - state / action / frames 的 sample_tick 连续性与对齐；
+  - 每张 JPEG 是否存在、大小是否合理、是否有未索引的孤儿文件；
+  - world_time 在同一维度内不回退（维度切换后的 40 刻内允许小幅重同步）；
+  - 玩家瞬移（排除维度切换）；
+  - 事件的 tick 是否存在于 state，暂停/恢复是否配对；
+  - state 中的维度切换是否与 dimension_change 事件一致；
+  - NaN / Infinity、关键字段缺失率；
+  - summary.json 与实际条数是否一致。
+
+退出码：0 通过；1（--strict 且有 ERROR）；2 路径或 episode 不存在。
+
+
+--------------------------------------------------------------------------------
+11. 常见问题
+--------------------------------------------------------------------------------
+
+Q: 按 K 没有反应？
+A: 确认已进入世界（不是标题界面），并且按键未被其他 Mod 占用。到
+   “选项 -> 控制 -> 按键绑定 -> Mwarecorder” 或设置界面 Keys 页重新绑定。
+   如果四类采集（画面/状态/操作/事件）全部关闭，模组会拒绝开始录制并在
+   聊天栏提示，请至少开启其中一类。
+
+Q: 录制中没有画面帧？
+A: Video 页确认“画面录制”开启；检查磁盘空间；若 drop 计数持续增长，
+   说明磁盘写入跟不上，可提高“每 N 帧取一帧”、降低分辨率/质量，或降低
+   编码队列上限。
+
+Q: 帧里没有 HUD / 悬浮窗？
+A: 这是设计如此：帧在 HUD 绘制之前从世界画面读取，避免把录制提示录进视频。
+   需要带 HUD 的画面请在外部录屏。
+
+Q: state.jsonl 为什么有缺刻？
+A: 暂停、打开设置、世界加载期间不写数据，恢复后继续，因此 sample_tick 只在
+   真正录制的刻上递增。会话边界有 session_pause/session_resume 标记。
+
+Q: 下界数据里坐标变小了？
+A: 下界坐标本来就是主世界的 1/8。请结合 dimension 字段与
+   dimension_change.from/to_overworld_equivalent 使用。
+
+Q: 达到多长时间 / 多大体积？
+A: 参考值（640x360、q0.85、每 2 帧一帧、约 30 FPS 客户端）：
+     画面约 10 帧/秒，约 0.4~0.7 MB/秒，约 1.5~2.5 GB/小时；
+     状态+动作约 20~40 KB/秒，约 70~140 MB/小时（不含完整背包）。
+   提高 every_n_frames、降低分辨率/质量可显著减小体积。
+
+Q: 多人服务器能用吗？
+A: 可以。客户端行为、画面、状态、方块/物品事件都能记录；但受伤/死亡/容器
+   槽位等“服务端权威”事件只有在单人（集成服务器）或服务端也装本模组时
+   才存在。多人服务器上这些事件会自然地缺失。
+
+Q: 停止录制后 summary 没生成？
+A: 正常停止（按键、命令、退出世界、关闭游戏）都会写 summary.json。若游戏
+   崩溃则可能缺失，此时 state/action/event 仍然可读，可用校验工具检查。
+
+Q: 设置界面太小/超出屏幕？
+A: 界面按 GUI 缩放自适应（内容宽度最多 430）。若窗口过小，可把 GUI 缩放
+   调小，或使用更少的行（每个分页最多 8 行）。
+
+
+--------------------------------------------------------------------------------
+12. 代码结构（便于二次开发）
+--------------------------------------------------------------------------------
+
+com.kurisa.mwarecorder
+  Mwarecorder.java                 公共入口：受伤/死亡/重生事件
+  MwarecorderClient.java           客户端入口：按键、tick 流水线、渲染与断开处理
+
+  config/MwarecorderConfig.java    配置定义、读写、校验、路径解析
+
+  recorder/
+    EpisodeManager.java            episode 生命周期与“是否正在录制”判定
+    TickRecorder.java              sample_tick 推进与状态写入
+    PlayerSnapshot.java            每刻玩家状态快照
+    FrameCapture.java              OpenGL 读像素 + 异步 JPEG 编码
+    ContainerTracker.java          容器界面开关检测
+    DimensionTracker.java          维度切换检测与事件
+    RecordingStats.java            悬浮窗/摘要用的实时计数
+    PausesRecording.java           标记“打开时暂停录制”的界面
+
+  event/
+    EventRecorder.java             事件队列、落盘、字段构造
+    EventCategory.java             事件分类与开关
+    EventFilter.java               事件范围（16x16/32x32…）过滤
+    SlotDiff.java                  容器槽位差异
+    ContainerEventBuilder.java     合成/熔炼/容器变化语义化
+
+  export/JsonExporter.java         所有输出文件的写入与元数据/摘要
+
+  input/
+    MwarecorderKeys.java           按键注册与重绑定
+    ActionRecorder.java            每刻输入快照
+    MouseInputRecorder.java        鼠标原始输入累积
+
+  ui/
+    MwarecorderConfigScreen.java   六页设置界面
+    MwarecorderHud.java            录制悬浮窗
+
+  command/MwarecorderClientCommand.java  客户端 /mwarecorder 命令
+
+  mixin/                           GameMode / ItemEntity / ServerPlayer /
+                                   Mouse / PauseScreen 注入
+
+  tools/
+    episode_to_dataset.py          episode -> numpy 数据集
+    verify_episode.py              episode 完整性校验
+
+
+--------------------------------------------------------------------------------
+13. 版本与兼容
+--------------------------------------------------------------------------------
+
+数据格式 format_version = 2.0（schema_version = 2）。
+旧版（1.1）episode 仍可被转换和校验：
+  - 缺少的字段按 0/默认值处理；
+  - 没有 dimension 字段时使用 "unknown"；
+  - 旧配置键 frame_capture.* / data.output_directory 读取时兼容。
+
+================================================================================

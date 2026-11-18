@@ -1,0 +1,38 @@
+{
+	"schemaVersion": 1,
+	"id": "mwarecorder",
+	"version": "${version}",
+	"name": "Mwarecorder",
+	"description": "Records frame-aligned video, player state, input and gameplay events into a dataset for world-model and imitation-learning research.",
+	"authors": [
+		"Kurisa"
+	],
+	"contact": {
+		"homepage": "https://github.com/Kurisa-kuku/MineWorld-Agent-Recorder",
+		"sources": "https://github.com/Kurisa-kuku/MineWorld-Agent-Recorder",
+		"issues": "https://github.com/Kurisa-kuku/MineWorld-Agent-Recorder/issues"
+	},
+	"license": "MIT",
+	"icon": "assets/mwarecorder/icon.png",
+	"environment": "*",
+	"entrypoints": {
+		"main": [
+			"com.kurisa.mwarecorder.Mwarecorder"
+		],
+		"fabric-datagen": [
+			"com.kurisa.mwarecorder.MwarecorderDataGenerator"
+		],
+		"client":[
+			"com.kurisa.mwarecorder.MwarecorderClient"
+		]
+	},
+	"mixins": [
+		"mwarecorder.mixins.json"
+	],
+	"depends": {
+		"fabricloader": ">=0.19.5",
+		"minecraft": "~1.21.7",
+		"java": ">=21",
+		"fabric-api": "*"
+	}
+}
